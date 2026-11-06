@@ -1,11 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { CreateUnverifiedPropertySchema, UpdatePropertySchema } = require('../dist/schemas/property.js');
+const { CreateUnverifiedPropertySchema } = require('../dist/schemas/property.js');
 const { LogFollowupSchema, SubmitEnquirySchema } = require('../dist/schemas/enquiry.js');
+const { requireRole } = require('../dist/middleware/requireRole.js');
 
 const validProperty = {
-  name: 'Sample PG',
-  category: 'PG',
+  title: 'Sample PG',
+  category: 'PG_HOSTEL',
   city: 'Pune',
   locality: 'Kothrud',
   addressLine: '1 Example Road',
@@ -14,6 +15,11 @@ const validProperty = {
   rentMax: 9000,
   ownerContactName: 'Owner',
   ownerContactPhone: '+919876543210',
+  categoryDetails: {
+    sharingTypes: ['DOUBLE'],
+    genderAllowed: 'BOYS',
+    foodIncluded: false,
+  },
 };
 
 test('property creation accepts valid values and applies defaults', () => {
@@ -32,9 +38,12 @@ test('property creation rejects rent ranges with max below min', () => {
   assert.equal(result.success, false);
 });
 
-test('property update rejects empty patches', () => {
-  assert.equal(UpdatePropertySchema.safeParse({}).success, false);
-  assert.equal(UpdatePropertySchema.safeParse({ locality: 'Baner' }).success, true);
+test('property creation rejects category details for a different property category', () => {
+  const result = CreateUnverifiedPropertySchema.safeParse({
+    ...validProperty,
+    categoryDetails: { bhkConfig: '2BHK' },
+  });
+  assert.equal(result.success, false);
 });
 
 test('enquiry rejects invalid property identifiers', () => {
@@ -55,4 +64,32 @@ test('sales follow-up validates the selected channel', () => {
     notes: 'Called tenant',
   });
   assert.equal(result.success, false);
+});
+
+test('role protection rejects spoofed identity headers without a bearer token', () => {
+  const req = {
+    headers: { 'x-user-id': '00000000-0000-0000-0000-000000000001', 'x-user-role': 'ADMIN' },
+    header: () => undefined,
+  };
+  let status;
+  let responseBody;
+  let nextCalled = false;
+  const res = {
+    status(code) {
+      status = code;
+      return this;
+    },
+    json(body) {
+      responseBody = body;
+      return this;
+    },
+  };
+
+  requireRole(['ADMIN'])(req, res, () => {
+    nextCalled = true;
+  });
+
+  assert.equal(status, 401);
+  assert.equal(responseBody.error, 'Authentication required');
+  assert.equal(nextCalled, false);
 });

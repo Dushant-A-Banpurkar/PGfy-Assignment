@@ -1,177 +1,161 @@
-import { PropertyStatus } from '@prisma/client';
-import { Response, Router } from 'express';
-import { z } from 'zod';
-import { authenticate } from '../auth/auth';
-import { AuthenticatedRequest, requireRole } from '../middleware/requireRole';
-import { CompleteVerificationSchema } from '../schemas/verification';
-import prisma from '../utils/prisma';
+import { VerifyDecision, VerifyStatus } from "@prisma/client";
+import { Response, Router } from "express";
+import { z } from "zod";
+import { prisma } from "../infrastructure/prisma";
+import { AuthenticatedRequest, requireRole } from "../middleware/requireRole";
+import { CompleteVerificationSchema } from "../schemas/verification";
 
 const router = Router();
 
 router.post(
-  '/api/admin/properties/:id/start-verification',
-  authenticate,
-  requireRole(['ADMIN']),
+  "/api/admin/properties/:id/start-verification",
+  requireRole(["ADMIN"]),
   async (req: AuthenticatedRequest, res: Response) => {
-    const propertyId = z.uuid().safeParse(req.params.id);
-    if (!propertyId.success) {
-      return res.status(400).json({ success: false, error: 'Invalid property ID' });
-    }
-    const adminId = req.user?.id;
-    if (!adminId || !z.uuid().safeParse(adminId).success) {
-      return res.status(401).json({ success: false, error: 'Authenticated admin ID is invalid' });
-    }
-
     try {
-      const property = await prisma.property.findFirst({
-        where: { id: propertyId.data, deletedAt: null },
-      });
-      if (!property) {
-        return res.status(404).json({ success: false, error: 'Property not found' });
+      const propertyId = Array.isArray(req.params.id)
+        ? req.params.id[0]
+        : req.params.id;
+      if (!propertyId) {
+        return res
+          .status(400)
+          .json({ success: false, error: "Invalid property ID" });
       }
-      if (
-        property.verificationStatus === PropertyStatus.VERIFIED ||
-        property.verificationStatus === PropertyStatus.UNDER_VERIFICATION
-      ) {
-        return res.status(409).json({
-          success: false,
-          error: `Cannot start verification while property is ${property.verificationStatus}`,
-        });
+      const adminId = req.user!.id;
+
+      const property = await prisma.property.findFirst({
+        where: { id: propertyId, deletedAt: null },
+      });
+
+      if (!property) {
+        return res
+          .status(404)
+          .json({ success: false, error: "Property not found" });
       }
 
       const result = await prisma.$transaction(async (tx) => {
-        const updatedProperty = await tx.property.update({
-          where: { id: property.id },
-          data: { verificationStatus: PropertyStatus.UNDER_VERIFICATION },
+        const updatedProp = await tx.property.update({
+          where: { id: propertyId },
+          data: { verificationStatus: VerifyStatus.UNDER_VERIFICATION },
         });
-        const verification = await tx.propertyVerification.create({
+
+        const verificationRecord = await tx.propertyVerification.create({
           data: {
-            propertyId: property.id,
-            reviewedByUserId: adminId,
-            decision: PropertyStatus.UNDER_VERIFICATION,
-            notes: 'Verification started',
+            propertyId,
+            reviewerAdminId: adminId,
+            decision: VerifyDecision.PENDING,
           },
         });
+
         await tx.propertyStatusHistory.create({
           data: {
-            propertyId: property.id,
+            propertyId,
             changedByUserId: adminId,
             fromStatus: property.verificationStatus,
-            toStatus: PropertyStatus.UNDER_VERIFICATION,
-            reason: 'Formal property verification started',
+            toStatus: VerifyStatus.UNDER_VERIFICATION,
+            reason: "Initiated formal ownership & physical site verification",
           },
         });
-        return { property: updatedProperty, verification };
+
+        return { property: updatedProp, verification: verificationRecord };
       });
 
       return res.json({ success: true, data: result });
-    } catch (error) {
-      console.error('Failed to start property verification:', error);
-      return res.status(500).json({ success: false, error: 'Failed to start verification' });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
     }
   },
 );
 
 router.post(
-  '/api/admin/properties/:id/complete-verification',
-  authenticate,
-  requireRole(['ADMIN']),
+  "/api/admin/properties/:id/complete-verification",
+  requireRole(["ADMIN"]),
   async (req: AuthenticatedRequest, res: Response) => {
-    const propertyId = z.uuid().safeParse(req.params.id);
-    if (!propertyId.success) {
-      return res.status(400).json({ success: false, error: 'Invalid property ID' });
-    }
-    const adminId = req.user?.id;
-    if (!adminId || !z.uuid().safeParse(adminId).success) {
-      return res.status(401).json({ success: false, error: 'Authenticated admin ID is invalid' });
-    }
-
-    const parsedBody = CompleteVerificationSchema.safeParse(req.body);
-    if (!parsedBody.success) {
-      return res.status(400).json({ success: false, errors: parsedBody.error.issues });
-    }
-    const parsed = parsedBody.data;
-
     try {
+      const propertyId = Array.isArray(req.params.id)
+        ? req.params.id[0]
+        : req.params.id;
+      if (!propertyId) {
+        return res
+          .status(400)
+          .json({ success: false, error: "Invalid property ID" });
+      }
+      const adminId = req.user!.id;
+      const parsed = CompleteVerificationSchema.parse(req.body);
+
       const property = await prisma.property.findFirst({
-        where: { id: propertyId.data, deletedAt: null },
+        where: { id: propertyId, deletedAt: null },
       });
+
       if (!property) {
-        return res.status(404).json({ success: false, error: 'Property not found' });
-      }
-      if (property.verificationStatus !== PropertyStatus.UNDER_VERIFICATION) {
-        return res.status(409).json({
-          success: false,
-          error: 'Start verification before recording its outcome',
-        });
+        return res
+          .status(404)
+          .json({ success: false, error: "Property not found" });
       }
 
-      if (parsed.verifiedOwnerId) {
-        const owner = await prisma.user.findFirst({
-          where: {
-            id: parsed.verifiedOwnerId,
-            role: 'PROPERTY_OWNER',
-            isActive: true,
-          },
-          select: { id: true },
-        });
-        if (!owner) {
-          return res.status(400).json({
-            success: false,
-            error: 'verifiedOwnerId must reference an active property owner',
-          });
-        }
-      }
-
-      const approved = parsed.decision === 'APPROVED';
-      const nextStatus = approved ? PropertyStatus.VERIFIED : PropertyStatus.REJECTED;
+      const isApproved = parsed.decision === "APPROVED";
+      const targetStatus = isApproved
+        ? VerifyStatus.VERIFIED
+        : VerifyStatus.REJECTED;
 
       const result = await prisma.$transaction(async (tx) => {
-        const verification = await tx.propertyVerification.create({
+        const verificationAudit = await tx.propertyVerification.create({
           data: {
-            propertyId: property.id,
-            reviewedByUserId: adminId,
-            decision: nextStatus,
-            notes: approved ? parsed.notes : parsed.rejectionReason,
+            propertyId,
+            reviewerAdminId: adminId,
+            ownershipDocVerified: parsed.ownershipDocVerified,
+            ownershipDocUrl: parsed.ownershipDocUrl,
+            physicalInspectionPassed: parsed.physicalInspectionPassed,
+            amenitiesConfirmed: parsed.amenitiesConfirmed,
+            decision: isApproved
+              ? VerifyDecision.APPROVED
+              : VerifyDecision.REJECTED,
+            rejectionReason: isApproved ? null : parsed.rejectionReason,
+            inspectionNotes: parsed.inspectionNotes,
+            inspectedAt: new Date(),
           },
         });
 
         const updatedProperty = await tx.property.update({
-          where: { id: property.id },
+          where: { id: propertyId },
           data: {
-            verificationStatus: nextStatus,
-            isPublished: approved ? property.isPublished : false,
-            label: approved ? 'PGfy Verified' : 'PGfy Not Verified',
-            verifiedOwnerId: approved ? parsed.verifiedOwnerId ?? property.verifiedOwnerId : null,
-            verifiedAt: approved ? new Date() : null,
+            verificationStatus: targetStatus,
+
+            isPublished: isApproved ? true : false,
+            badgeLabel: isApproved ? "PGfy Verified" : "PGfy Not Verified",
+            verifiedOwnerId: isApproved
+              ? parsed.verifiedOwnerId || property.verifiedOwnerId
+              : null,
+            verifiedAt: isApproved ? new Date() : null,
           },
         });
 
         await tx.propertyStatusHistory.create({
           data: {
-            propertyId: property.id,
+            propertyId,
             changedByUserId: adminId,
             fromStatus: property.verificationStatus,
-            toStatus: nextStatus,
-            reason: approved
-              ? parsed.notes ?? 'Property verification approved'
-              : parsed.rejectionReason,
+            toStatus: targetStatus,
+            reason: isApproved
+              ? "Property passed verification and converted in-place to PGfy Verified"
+              : `Verification rejected: ${parsed.rejectionReason}`,
           },
         });
 
-        return { property: updatedProperty, verification };
+        return { property: updatedProperty, verificationAudit };
       });
 
       return res.json({
         success: true,
-        message: approved
-          ? 'Property verification approved'
-          : 'Property verification rejected and the listing unpublished',
+        message: isApproved
+          ? "Property successfully converted to PGfy Verified in-place. All historical enquiries remain linked."
+          : "Property verification rejected and unpublished from tenant discovery.",
         data: result,
       });
-    } catch (error) {
-      console.error('Failed to complete property verification:', error);
-      return res.status(500).json({ success: false, error: 'Failed to complete verification' });
+    } catch (err: any) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ success: false, errors: err.issues });
+      }
+      return res.status(500).json({ success: false, error: err.message });
     }
   },
 );

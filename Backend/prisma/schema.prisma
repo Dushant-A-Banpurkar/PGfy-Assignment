@@ -1,5 +1,7 @@
+
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
@@ -7,53 +9,55 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum Role {
+
+enum UserRole {
   ADMIN
-  TENANT
   SALES_AGENT
+  TENANT
   PROPERTY_OWNER
 }
 
-enum CategoryProp {
-  PG
-  HOSTEL
+enum PropertyCategory {
+  PG_HOSTEL
   DORMITORY
   FLAT
-  ROOM
+  INDIVIDUAL_ROOM
 }
 
-enum PropertyStatus {
+enum VerifyStatus {
   DRAFT
-  VERIFIED
   PUBLISHED_UNVERIFIED
   UNDER_VERIFICATION
+  VERIFIED
   REJECTED
-  HOLD
-}
-
-enum FollowUpChannel {
-  EMAIL
-  WHATSAPP
-  PHONE_CALL
-  ON_SITE
-}
-
-enum NotificationType {
-  EMAIL
-  WHATSAPP
+  ARCHIVED
 }
 
 enum MediaType {
   IMAGE
   VIDEO
+  FLOOR_PLAN
 }
 
 enum EnquiryStatus {
   NEW
   ASSIGNED
-  FOLLOWUP
-  VISIT
-  ENQUIRY_CLOSED
+  IN_FOLLOWUP
+  VISIT_SCHEDULED
+  CONVERTED
+  CLOSED_LOST
+}
+
+enum FollowupChannel {
+  PHONE_CALL
+  WHATSAPP
+  EMAIL
+  SITE_VISIT
+}
+
+enum NotifyChannel {
+  WHATSAPP
+  EMAIL
 }
 
 enum DeliveryStatus {
@@ -63,83 +67,103 @@ enum DeliveryStatus {
   FAILED
 }
 
+enum VerifyDecision {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+
 model User {
   id        String   @id @default(uuid()) @db.Uuid
   email     String   @unique @db.VarChar(255)
-  phone     String?  @db.VarChar(20)
-  fullName  String   @db.VarChar(255)
-  role      Role     @default(TENANT)
+  phone     String   @db.VarChar(20)
+  password  String   @db.VarChar(255)
+  fullName  String   @map("full_name") @db.VarChar(120)
+  role      UserRole @default(TENANT)
   isActive  Boolean  @default(true) @map("is_active")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz()
 
-  adminCreatedProperties Property[] @relation("AdminCreatedProperties")
-  verifiedOwnedProperties Property[] @relation("OwnerVerifiedProperties")
-  tenantEnquiries Enquiry[] @relation("TenantEnquiries")
-  assignedEnquiries Enquiry[] @relation("SalesAssignedEnquiries")
-  salesFollowups EnquiryFollowup[] @relation("SalesAgentFollowups")
-  verificationAudits PropertyVerification[] @relation("ReviewVerifications")
-  statusChanges PropertyStatusHistory[] @relation("UserStatusChanges")
+  createdProperties  Property[]              @relation("AdminCreatedProperties")
+  ownedProperties    Property[]              @relation("OwnerVerifiedProperties")
+  tenantEnquiries    Enquiry[]               @relation("TenantEnquiries")
+  assignedEnquiries  Enquiry[]               @relation("SalesAssignedEnquiries")
+  salesFollowups     EnquiryFollowup[]       @relation("SalesAgentFollowups")
+  verificationAudits PropertyVerification[]  @relation("ReviewerVerifications")
+  statusChanges      PropertyStatusHistory[] @relation("UserStatusChanges")
 
-  @@index([role, isActive])
+  @@index([phone], name: "idx_users_phone")
+  @@index([role, isActive], name: "idx_users_role_active")
+  @@map("users")
 }
 
 model Property {
-  id                   String    @id @default(uuid()) @db.Uuid
-  name                 String    @db.VarChar(255)
-  description          String?   @db.Text
-  category             CategoryProp
-  verificationStatus   PropertyStatus @default(DRAFT) @map("verification_status")
-  isPublished          Boolean   @default(false) @map("is_published")
-  label                String    @default("PGfy Not Verified") @map("label") @db.VarChar(80)
-  city                 String    @db.VarChar(120)
-  locality             String    @db.VarChar(120)
-  addressLine          String    @map("address_line") @db.Text
-  pincode              String    @db.VarChar(12)
-  rentMin              Int       @map("rent_min")
-  rentMax              Int       @map("rent_max")
-  securityDeposit      Int       @default(0) @map("security_deposit")
-  ownerContactName     String    @map("owner_contact_name") @db.VarChar(120)
-  ownerContactPhone    String    @map("owner_contact_phone") @db.VarChar(20)
-  ownerContactEmail    String?   @map("owner_contact_email") @db.VarChar(255)
-  normalizedDedupKey   String    @map("normalized_dedup_key") @db.VarChar(255)
-  categoryDetails      Json      @default("{}") @map("category_details")
-  amenities           String[]  @default([])
-  createdByAdminId     String    @map("created_by_admin_id") @db.Uuid
-  verifiedOwnerId      String?   @map("verified_owner_id") @db.Uuid
-  verifiedAt           DateTime? @map("verified_at") @db.Timestamptz()
-  deletedAt            DateTime? @map("deleted_at") @db.Timestamptz()
-  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz()
-  updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamptz()
+  id                 String           @id @default(uuid()) @db.Uuid
+  slug               String           @unique @db.VarChar(180)
+  title              String           @db.VarChar(200)
+  description        String?          @db.Text
+  category           PropertyCategory
+  verificationStatus VerifyStatus     @default(DRAFT) @map("verification_status")
+  isPublished        Boolean          @default(false) @map("is_published")
+  badgeLabel         String           @default("PGfy Not Verified") @map("badge_label") @db.VarChar(60)
 
-  createdByAdmin       User     @relation("AdminCreatedProperties", fields: [createdByAdminId], references: [id], onDelete: Restrict)
-  verifiedOwner        User?    @relation("OwnerVerifiedProperties", fields: [verifiedOwnerId], references: [id], onDelete: SetNull)
 
-  media                PropertyMedia[]
-  enquiries            Enquiry[]
-  verifications        PropertyVerification[]
-  statusHistory        PropertyStatusHistory[]
+  city               String           @db.VarChar(80)
+  locality           String           @db.VarChar(120)
+  addressLine        String           @map("address_line") @db.Text
+  pincode            String           @db.VarChar(10)
+  latitude           Decimal?         @db.Decimal(9, 6)
+  longitude          Decimal?         @db.Decimal(9, 6)
 
-  @@index([isPublished, verificationStatus, createdAt])
-  @@index([city, locality])
-  @@index([normalizedDedupKey, deletedAt])
+  // Pricing (Stored in INR)
+  rentMin            Int              @map("rent_min")
+  rentMax            Int              @map("rent_max")
+  securityDeposit    Int              @default(0) @map("security_deposit")
+
+  ownerContactName   String           @map("owner_contact_name") @db.VarChar(120)
+  ownerContactPhone  String           @map("owner_contact_phone") @db.VarChar(20)
+  ownerContactEmail  String?          @map("owner_contact_email") @db.VarChar(255)
+  normalizedDedupKey String           @map("normalized_dedup_key") @db.VarChar(160)
+
+
+  categoryDetails    Json             @default("{}") @map("category_details") @db.JsonB
+  amenities          String[]         @default([])
+
+
+  createdByAdminId   String           @map("created_by_admin_id") @db.Uuid
+  verifiedOwnerId    String?          @map("verified_owner_id") @db.Uuid
+  verifiedAt         DateTime?        @map("verified_at") @db.Timestamptz()
+  deletedAt          DateTime?        @map("deleted_at") @db.Timestamptz()
+  createdAt          DateTime         @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt          DateTime         @updatedAt @map("updated_at") @db.Timestamptz()
+
+  createdByAdmin     User                    @relation("AdminCreatedProperties", fields: [createdByAdminId], references: [id], onDelete: Restrict)
+  verifiedOwner      User?                   @relation("OwnerVerifiedProperties", fields: [verifiedOwnerId], references: [id], onDelete: SetNull)
+  media              PropertyMedia[]
+  enquiries          Enquiry[]
+  verifications      PropertyVerification[]
+  statusHistory      PropertyStatusHistory[]
+
+  @@index([city, locality, category, verificationStatus, isPublished], name: "idx_property_tenant_discovery")
+  @@index([normalizedDedupKey], name: "idx_property_dedup_key")
+  @@index([ownerContactPhone], name: "idx_property_owner_phone")
+  @@map("properties")
 }
 
-model EnquiryFollowup {
-  id             String    @id @default(uuid()) @db.Uuid
-  enquiryId      String    @map("enquiry_id") @db.Uuid
-  salesAgentId   String    @map("sales_agent_id") @db.Uuid
-  channel        FollowUpChannel
-  outcomeStatus  String    @map("outcome_status") @db.VarChar(80)
-  notes          String    @db.Text
-  nextFollowupAt DateTime? @map("next_followup_at") @db.Timestamptz()
-  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+model PropertyMedia {
+  id         String    @id @default(uuid()) @db.Uuid
+  propertyId String    @map("property_id") @db.Uuid
+  mediaUrl   String    @map("media_url") @db.Text
+  mediaType  MediaType @default(IMAGE) @map("media_type")
+  isPrimary  Boolean   @default(false) @map("is_primary")
+  sortOrder  Int       @default(0) @map("sort_order")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz()
 
-  enquiry        Enquiry @relation(fields: [enquiryId], references: [id], onDelete: Cascade)
-  salesAgent     User    @relation("SalesAgentFollowups", fields: [salesAgentId], references: [id], onDelete: Restrict)
+  property   Property  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
 
-  @@index([enquiryId, createdAt])
-  @@index([salesAgentId, createdAt])
+  @@index([propertyId, sortOrder], name: "idx_property_media_order")
+  @@map("property_media")
 }
 
 model Enquiry {
@@ -164,61 +188,36 @@ model Enquiry {
   followups             EnquiryFollowup[]
   notifications         NotificationLog[]
 
-  @@index([propertyId, tenantPhone, createdAt])
-  @@index([assignedSalesId, status, createdAt])
+  @@index([propertyId, createdAt], name: "idx_enquiry_property")
+  @@index([assignedSalesId, status, createdAt], name: "idx_enquiry_sales_queue")
+  @@index([tenantPhone, propertyId], name: "idx_enquiry_tenant_dedup")
+  @@map("enquiries")
 }
 
-model PropertyVerification {
-  id               String    @id @default(uuid()) @db.Uuid
-  propertyId        String    @map("property_id") @db.Uuid
-  reviewedByUserId String    @map("reviewed_by_user_id") @db.Uuid
-  decision         PropertyStatus @default(UNDER_VERIFICATION) @map("decision")
-  notes            String?   @db.Text
-  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz()
-  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz()
+model EnquiryFollowup {
+  id             String          @id @default(uuid()) @db.Uuid
+  enquiryId      String          @map("enquiry_id") @db.Uuid
+  salesAgentId   String          @map("sales_agent_id") @db.Uuid
+  channel        FollowupChannel
+  outcomeStatus  String          @map("outcome_status") @db.VarChar(80)
+  notes          String          @db.Text
+  nextFollowupAt DateTime?       @map("next_followup_at") @db.Timestamptz()
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz()
 
-  property         Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
-  reviewedByUser  User     @relation("ReviewVerifications", fields: [reviewedByUserId], references: [id], onDelete: Restrict)
+  enquiry        Enquiry         @relation(fields: [enquiryId], references: [id], onDelete: Cascade)
+  salesAgent     User            @relation("SalesAgentFollowups", fields: [salesAgentId], references: [id], onDelete: Restrict)
 
-  @@index([propertyId, createdAt])
-}
-
-model PropertyStatusHistory {
-  id              String         @id @default(uuid()) @db.Uuid
-  propertyId      String         @map("property_id") @db.Uuid
-  changedByUserId String         @map("changed_by_user_id") @db.Uuid
-  fromStatus      PropertyStatus? @map("from_status")
-  toStatus        PropertyStatus @map("to_status")
-  reason          String?        @db.Text
-  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz()
-
-  property        Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
-  changedByUser   User     @relation("UserStatusChanges", fields: [changedByUserId], references: [id], onDelete: Restrict)
-
-  @@index([propertyId, createdAt])
-}
-
-model PropertyMedia {
-  id         String    @id @default(uuid()) @db.Uuid
-  propertyId String    @map("property_id") @db.Uuid
-  mediaUrl  String    @map("media_url") @db.Text
-  mediaType MediaType @default(IMAGE) @map("media_type")
-  isPrimary Boolean   @default(false) @map("is_primary")
-  sortOrder Int       @default(0) @map("sort_order")
-  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz()
-
-  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
-
-  @@index([propertyId, sortOrder])
+  @@index([enquiryId, createdAt], name: "idx_followup_enquiry_timeline")
+  @@map("enquiry_followups")
 }
 
 model NotificationLog {
   id                String         @id @default(uuid()) @db.Uuid
   enquiryId         String         @map("enquiry_id") @db.Uuid
-  channel           NotificationType
+  channel           NotifyChannel
   recipient         String         @db.VarChar(180)
   providerMessageId String?        @map("provider_message_id") @db.VarChar(160)
-  deliveryStatus    DeliveryStatus  @default(QUEUED) @map("delivery_status")
+  deliveryStatus    DeliveryStatus @default(QUEUED) @map("delivery_status")
   retryCount        Int            @default(0) @map("retry_count")
   errorMessage      String?        @map("error_message") @db.Text
   sentAt            DateTime?      @map("sent_at") @db.Timestamptz()
@@ -228,6 +227,47 @@ model NotificationLog {
 
   enquiry           Enquiry        @relation(fields: [enquiryId], references: [id], onDelete: Cascade)
 
-  @@index([deliveryStatus, createdAt])
-  @@index([enquiryId, channel])
+  @@index([enquiryId, channel], name: "idx_notification_enquiry_channel")
+  @@index([deliveryStatus], name: "idx_notification_status")
+  @@map("notification_logs")
+}
+
+model PropertyVerification {
+  id                       String         @id @default(uuid()) @db.Uuid
+  propertyId               String         @map("property_id") @db.Uuid
+  reviewerAdminId          String         @map("reviewer_admin_id") @db.Uuid
+  ownershipDocVerified     Boolean        @default(false) @map("ownership_doc_verified")
+  ownershipDocUrl          String?        @map("ownership_doc_url") @db.Text
+  physicalInspectionPassed Boolean        @default(false) @map("physical_inspection_passed")
+  amenitiesConfirmed       Boolean        @default(false) @map("amenities_confirmed")
+  decision                 VerifyDecision @default(PENDING)
+  rejectionReason          String?        @map("rejection_reason") @db.Text
+  inspectionNotes          String?        @map("inspection_notes") @db.Text
+  inspectedAt              DateTime?      @map("inspected_at") @db.Timestamptz()
+  createdAt                DateTime       @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt                DateTime       @updatedAt @map("updated_at") @db.Timestamptz()
+
+  // Relations
+  property                 Property       @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  reviewerAdmin            User           @relation("ReviewerVerifications", fields: [reviewerAdminId], references: [id], onDelete: Restrict)
+
+  @@index([propertyId, decision], name: "idx_verification_property_decision")
+  @@map("property_verifications")
+}
+
+model PropertyStatusHistory {
+  id              String        @id @default(uuid()) @db.Uuid
+  propertyId      String        @map("property_id") @db.Uuid
+  changedByUserId String        @map("changed_by_user_id") @db.Uuid
+  fromStatus      VerifyStatus? @map("from_status")
+  toStatus        VerifyStatus  @map("to_status")
+  reason          String?       @db.Text
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz()
+
+
+  property        Property      @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  changedByUser   User          @relation("UserStatusChanges", fields: [changedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([propertyId, createdAt], name: "idx_status_history_property")
+  @@map("property_status_history")
 }

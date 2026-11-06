@@ -1,16 +1,40 @@
-import { z } from 'zod';
+import { z } from "zod";
 
 export const CompleteVerificationSchema = z
   .object({
-    decision: z.enum(['APPROVED', 'REJECTED']),
-    verifiedOwnerId: z.uuid().optional(),
-    notes: z.string().trim().max(5000).optional(),
-    rejectionReason: z.string().trim().min(1).max(2000).optional(),
+    ownershipDocVerified: z.boolean(),
+    ownershipDocUrl: z.string().url().optional(),
+    physicalInspectionPassed: z.boolean(),
+    amenitiesConfirmed: z.boolean(),
+    decision: z.enum(["APPROVED", "REJECTED"]),
+    rejectionReason: z.string().optional(),
+    inspectionNotes: z.string().optional(),
+    verifiedOwnerId: z.string().uuid().optional(),
   })
-  .refine(
-    (value) => value.decision !== 'REJECTED' || Boolean(value.rejectionReason),
-    {
-      message: 'rejectionReason is required when the verification is rejected',
-      path: ['rejectionReason'],
-    },
-  );
+  .superRefine((data, ctx) => {
+    if (data.decision === "APPROVED") {
+      if (
+        !data.ownershipDocVerified ||
+        !data.physicalInspectionPassed ||
+        !data.amenitiesConfirmed
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["decision"],
+          message:
+            "Cannot APPROVE property unless ownershipDocVerified, physicalInspectionPassed, and amenitiesConfirmed are all true.",
+        });
+      }
+    }
+    if (
+      data.decision === "REJECTED" &&
+      (!data.rejectionReason || data.rejectionReason.trim().length < 5)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["rejectionReason"],
+        message:
+          "A detailed rejectionReason is mandatory when rejecting a property verification.",
+      });
+    }
+  });

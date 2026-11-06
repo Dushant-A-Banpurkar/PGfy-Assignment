@@ -1,295 +1,207 @@
-import { CategoryProp, Prisma, PropertyStatus } from '@prisma/client';
-import { Response, Router } from 'express';
-import { z } from 'zod';
-import { authenticate } from '../auth/auth';
-import { AuthenticatedRequest, requireRole } from '../middleware/requireRole';
-import { CreateUnverifiedPropertySchema, UpdatePropertySchema } from '../schemas/property';
-import prisma from '../utils/prisma';
+import { PropertyCategory, VerifyStatus } from "@prisma/client";
+import { Response, Router } from "express";
+import { z } from "zod";
+import { prisma } from "../infrastructure/prisma";
+import { AuthenticatedRequest, requireRole } from "../middleware/requireRole";
+import { CreateUnverifiedPropertySchema } from "../schemas/property";
+import {
+  computeNormalizedDedupKey,
+  generatePropertySlug,
+} from "../utils/property";
 
 const router = Router();
 
-function makeDedupKey(ownerPhone: string, pincode: string, name: string): string {
-  const phone = ownerPhone.replace(/\D/g, '');
-  const normalizedName = name.normalize('NFKC').trim().toLocaleLowerCase('en');
-  return `${phone}|${pincode.trim().toLowerCase()}|${normalizedName}`;
-}
-
 router.post(
-  '/api/admin/properties',
-  authenticate,
-  requireRole(['ADMIN']),
+  "/api/admin/properties",
+  requireRole(["ADMIN"]),
   async (req: AuthenticatedRequest, res: Response) => {
-    const parsedBody = CreateUnverifiedPropertySchema.safeParse(req.body);
-    if (!parsedBody.success) {
-      return res.status(400).json({ success: false, errors: parsedBody.error.issues });
-    }
-
-    const adminId = req.user?.id;
-    if (!adminId || !z.uuid().safeParse(adminId).success) {
-      return res.status(401).json({ success: false, error: 'Authenticated admin ID is invalid' });
-    }
-
-    const parsed = parsedBody.data;
-    const normalizedDedupKey = makeDedupKey(parsed.ownerContactPhone, parsed.pincode, parsed.name);
-
     try {
-      const duplicate = await prisma.property.findFirst({
-        where: { normalizedDedupKey, deletedAt: null },
+      const parsed = CreateUnverifiedPropertySchema.parse(req.body);
+      const adminId = req.user!.id;
+
+      const dedupKey = computeNormalizedDedupKey(
+        parsed.ownerContactPhone,
+        parsed.pincode,
+        parsed.title,
+      );
+
+      const existingDuplicates = await prisma.property.findMany({
+        where: {
+          deletedAt: null,
+          OR: [
+            { normalizedDedupKey: dedupKey },
+            ...(parsed.latitude !== undefined && parsed.longitude !== undefined
+              ? [
+                  {
+                    ownerContactPhone: parsed.ownerContactPhone,
+                    latitude: {
+                      gte: parsed.latitude - 0.00045,
+                      lte: parsed.latitude + 0.00045,
+                    }, // ~50m bounding box
+                    longitude: {
+                      gte: parsed.longitude - 0.00045,
+                      lte: parsed.longitude + 0.00045,
+                    },
+                  },
+                ]
+              : []),
+          ],
+        },
         select: {
           id: true,
-          name: true,
+          title: true,
+          slug: true,
           verificationStatus: true,
-          city: true,
           locality: true,
         },
       });
 
-      if (duplicate && !parsed.forceCreateIgnoreDuplicateWarning) {
+      if (
+        existingDuplicates.length > 0 &&
+        !parsed.forceCreateIgnoreDuplicateWarning
+      ) {
         return res.status(409).json({
           success: false,
-          code: 'DUPLICATE_PROPERTY_WARNING',
-          message: 'A potentially matching property already exists.',
-          existingMatch: duplicate,
+          code: "DUPLICATE_PROPERTY_WARNING",
+          message:
+            "A potentially matching property with the same owner phone/location already exists. Pass forceCreateIgnoreDuplicateWarning: true to override.",
+          existingMatches: existingDuplicates,
         });
       }
 
-      const initialStatus: PropertyStatus = parsed.publishImmediately
-        ? PropertyStatus.PUBLISHED_UNVERIFIED
-        : PropertyStatus.DRAFT;
+      const initialStatus = parsed.publishImmediately
+        ? VerifyStatus.PUBLISHED_UNVERIFIED
+        : VerifyStatus.DRAFT;
 
-      const property = await prisma.$transaction(async (tx) => {
-        const created = await tx.property.create({
+      const slug = generatePropertySlug(
+        parsed.title,
+        parsed.locality,
+        parsed.city,
+      );
+
+      const createdProperty = await prisma.$transaction(async (tx) => {
+        const prop = await tx.property.create({
           data: {
-            name: parsed.name,
+            slug,
+            title: parsed.title,
             description: parsed.description,
-            category: parsed.category as CategoryProp,
+            category: parsed.category,
             verificationStatus: initialStatus,
             isPublished: parsed.publishImmediately,
-            label: 'PGfy Not Verified',
+            badgeLabel: "PGfy Not Verified",
             city: parsed.city,
             locality: parsed.locality,
             addressLine: parsed.addressLine,
             pincode: parsed.pincode,
+            latitude: parsed.latitude,
+            longitude: parsed.longitude,
             rentMin: parsed.rentMin,
             rentMax: parsed.rentMax,
             securityDeposit: parsed.securityDeposit,
             ownerContactName: parsed.ownerContactName,
             ownerContactPhone: parsed.ownerContactPhone,
             ownerContactEmail: parsed.ownerContactEmail,
-            normalizedDedupKey,
-            ...(parsed.categoryDetails
-              ? { categoryDetails: parsed.categoryDetails as Prisma.InputJsonValue }
-              : {}),
+            normalizedDedupKey: dedupKey,
+            categoryDetails: parsed.categoryDetails as any,
             amenities: parsed.amenities,
             createdByAdminId: adminId,
-            ...(parsed.media.length
-              ? {
-                  media: {
-                    create: parsed.media,
-                  },
-                }
-              : {}),
+            media: {
+              create: parsed.media.map((m) => ({
+                mediaUrl: m.mediaUrl,
+                mediaType: m.mediaType,
+                isPrimary: m.isPrimary,
+                sortOrder: m.sortOrder,
+              })),
+            },
           },
           include: { media: true },
         });
 
         await tx.propertyStatusHistory.create({
           data: {
-            propertyId: created.id,
+            propertyId: prop.id,
             changedByUserId: adminId,
+            fromStatus: null,
             toStatus: initialStatus,
             reason: parsed.publishImmediately
-              ? 'Created and published as an unverified listing'
-              : 'Created as a draft unverified listing',
+              ? "Admin created and immediately published unverified listing"
+              : "Admin created unverified listing in DRAFT state",
           },
         });
 
-        return created;
+        return prop;
       });
 
-      return res.status(201).json({ success: true, data: property });
-    } catch (error) {
-      console.error('Failed to create property:', error);
-      return res.status(500).json({ success: false, error: 'Failed to create property' });
+      return res.status(201).json({
+        success: true,
+        data: createdProperty,
+      });
+    } catch (err: any) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ success: false, errors: err.issues });
+      }
+      return res.status(500).json({ success: false, error: err.message });
     }
   },
 );
 
 router.patch(
-  '/api/admin/properties/:id',
-  authenticate,
-  requireRole(['ADMIN']),
+  "/api/admin/properties/:id/publish",
+  requireRole(["ADMIN"]),
   async (req: AuthenticatedRequest, res: Response) => {
-    const id = z.uuid().safeParse(req.params.id);
-    if (!id.success) {
-      return res.status(400).json({ success: false, error: 'Invalid property ID' });
-    }
-
-    const parsedBody = UpdatePropertySchema.safeParse(req.body);
-    if (!parsedBody.success) {
-      return res.status(400).json({ success: false, errors: parsedBody.error.issues });
-    }
-    const adminId = req.user?.id;
-    if (!adminId) return res.status(401).json({ success: false, error: 'Authentication required' });
-
     try {
+      const propertyId = Array.isArray(req.params.id)
+        ? req.params.id[0]
+        : req.params.id;
+      if (!propertyId) {
+        return res
+          .status(400)
+          .json({ success: false, error: "Invalid property ID" });
+      }
+      const adminId = req.user!.id;
+
       const existing = await prisma.property.findFirst({
-        where: { id: id.data, deletedAt: null },
+        where: { id: propertyId, deletedAt: null },
       });
+
       if (!existing) {
-        return res.status(404).json({ success: false, error: 'Property not found' });
+        return res
+          .status(404)
+          .json({ success: false, error: "Property not found" });
       }
-
-      const rentMin = parsedBody.data.rentMin ?? existing.rentMin;
-      const rentMax = parsedBody.data.rentMax ?? existing.rentMax;
-      if (rentMax < rentMin) {
-        return res.status(400).json({
-          success: false,
-          errors: [{ path: ['rentMax'], message: 'rentMax must be greater than or equal to rentMin' }],
-        });
-      }
-
-      const nextName = parsedBody.data.name ?? existing.name;
-      const nextPhone = parsedBody.data.ownerContactPhone ?? existing.ownerContactPhone;
-      const nextPincode = parsedBody.data.pincode ?? existing.pincode;
-      const normalizedDedupKey = makeDedupKey(nextPhone, nextPincode, nextName);
-      if (normalizedDedupKey !== existing.normalizedDedupKey) {
-        const duplicate = await prisma.property.findFirst({
-          where: {
-            id: { not: existing.id },
-            normalizedDedupKey,
-            deletedAt: null,
-          },
-          select: { id: true, name: true, verificationStatus: true },
-        });
-        if (duplicate) {
-          return res.status(409).json({
-            success: false,
-            code: 'DUPLICATE_PROPERTY_WARNING',
-            message: 'A potentially matching property already exists.',
-            existingMatch: duplicate,
-          });
-        }
-      }
-
-      const { categoryDetails, ...fields } = parsedBody.data;
-      const updated = await prisma.property.update({
-        where: { id: existing.id },
-        data: {
-          ...fields,
-          ...(categoryDetails
-            ? { categoryDetails: categoryDetails as Prisma.InputJsonValue }
-            : {}),
-          normalizedDedupKey,
-        },
-      });
-
-      return res.json({ success: true, data: updated });
-    } catch (error) {
-      console.error('Failed to update property:', error);
-      return res.status(500).json({ success: false, error: 'Failed to update property' });
-    }
-  },
-);
-
-router.patch(
-  '/api/admin/properties/:id/publish',
-  authenticate,
-  requireRole(['ADMIN']),
-  async (req: AuthenticatedRequest, res: Response) => {
-    const id = z.uuid().safeParse(req.params.id);
-    if (!id.success) {
-      return res.status(400).json({ success: false, error: 'Invalid property ID' });
-    }
-
-    const adminId = req.user?.id;
-    if (!adminId || !z.uuid().safeParse(adminId).success) {
-      return res.status(401).json({ success: false, error: 'Authenticated admin ID is invalid' });
-    }
-
-    try {
-      const existing = await prisma.property.findFirst({
-        where: { id: id.data, deletedAt: null },
-      });
-      if (!existing) {
-        return res.status(404).json({ success: false, error: 'Property not found' });
-      }
-
-      if (
-        existing.verificationStatus === PropertyStatus.REJECTED ||
-        existing.verificationStatus === PropertyStatus.HOLD
-      ) {
-        return res.status(409).json({
-          success: false,
-          error: `A property in ${existing.verificationStatus} status cannot be published`,
-        });
-      }
-
-      const nextStatus =
-        existing.verificationStatus === PropertyStatus.VERIFIED
-          ? PropertyStatus.VERIFIED
-          : existing.verificationStatus === PropertyStatus.UNDER_VERIFICATION
-            ? PropertyStatus.UNDER_VERIFICATION
-            : PropertyStatus.PUBLISHED_UNVERIFIED;
 
       const updated = await prisma.$transaction(async (tx) => {
-        const result = await tx.property.update({
-          where: { id: id.data },
+        const prop = await tx.property.update({
+          where: { id: propertyId },
           data: {
-            verificationStatus: nextStatus,
+            verificationStatus:
+              existing.verificationStatus === VerifyStatus.VERIFIED
+                ? VerifyStatus.VERIFIED
+                : VerifyStatus.PUBLISHED_UNVERIFIED,
             isPublished: true,
-            label:
-              nextStatus === PropertyStatus.VERIFIED
-                ? 'PGfy Verified'
-                : 'PGfy Not Verified',
+            badgeLabel:
+              existing.verificationStatus === VerifyStatus.VERIFIED
+                ? "PGfy Verified"
+                : "PGfy Not Verified",
           },
         });
 
-        if (!existing.isPublished || existing.verificationStatus !== nextStatus) {
-          await tx.propertyStatusHistory.create({
-            data: {
-              propertyId: id.data,
-              changedByUserId: adminId,
-              fromStatus: existing.verificationStatus,
-              toStatus: nextStatus,
-              reason: 'Published property to tenant discovery',
-            },
-          });
-        }
+        await tx.propertyStatusHistory.create({
+          data: {
+            propertyId,
+            changedByUserId: adminId,
+            fromStatus: existing.verificationStatus,
+            toStatus: prop.verificationStatus,
+            reason: "Published listing to tenant discovery portal",
+          },
+        });
 
-        return result;
+        return prop;
       });
 
       return res.json({ success: true, data: updated });
-    } catch (error) {
-      console.error('Failed to publish property:', error);
-      return res.status(500).json({ success: false, error: 'Failed to publish property' });
-    }
-  },
-);
-
-router.delete(
-  '/api/admin/properties/:id',
-  authenticate,
-  requireRole(['ADMIN']),
-  async (req: AuthenticatedRequest, res: Response) => {
-    const id = z.uuid().safeParse(req.params.id);
-    if (!id.success) {
-      return res.status(400).json({ success: false, error: 'Invalid property ID' });
-    }
-
-    try {
-      const result = await prisma.property.updateMany({
-        where: { id: id.data, deletedAt: null },
-        data: { deletedAt: new Date(), isPublished: false },
-      });
-      if (result.count === 0) {
-        return res.status(404).json({ success: false, error: 'Property not found' });
-      }
-      return res.status(204).send();
-    } catch (error) {
-      console.error('Failed to archive property:', error);
-      return res.status(500).json({ success: false, error: 'Failed to archive property' });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
     }
   },
 );

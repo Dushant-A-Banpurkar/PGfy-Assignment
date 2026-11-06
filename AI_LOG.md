@@ -144,6 +144,20 @@
 - What you learned: “Backend architecture” can refer either to the codebase folder organization or to a high-level system design document; here the request was about the code folders.
 - End note: No code changes were made for this clarification.
 
-Total entries: 10
+## Entry 11
+- Running number: 11
+- Date & time: 06/11/2026 09:09 IST
+- Tool: Copilot
+- Section: Repository-level README
+- Why you asked: I needed a proper project README at the repository root, outside the Backend folder, to explain the repository structure, backend setup, and assignment status.
+- Time spent before asking: Not recorded
+- Prompt(s):
+  1. `create proper readme file outside of the backend folder.`
+- What AI gave: Created a root README describing the project, folder layout, backend setup and verification commands, required external services, and remaining assignment deliverables.
+- What you used: Adapted
+- What you learned: A repository-level README should orient readers at the project root and point to component-specific setup documentation without claiming that configuration-dependent integrations are already operational.
+- End note: Documentation only; no code or runtime behavior changed.
 
-AI reliance summary: AI was used to interpret the assignment, debug and validate Prisma schema relations, confirm assignment scope, configure PostgreSQL/Prisma, repair API routes and server wiring, assess readiness, complete the enquiry outbox/worker/provider integration, and clarify the code folder structure. The notification worker code was reported as Google-assisted; its exact tool/search history must be added from the user's records. Changes were adapted and validated with a TypeScript build, focused tests, and Prisma validation. Live database connectivity, trusted JWT issuance, Redis availability, and provider account credentials still require setup before end-to-end operation.
+Total entries: 11
+
+AI reliance summary: AI was used to interpret the assignment, debug and validate Prisma schema relations, confirm assignment scope, configure PostgreSQL/Prisma, repair API routes and server wiring, assess readiness, complete the enquiry outbox/worker/provider integration, clarify the code folder structure, and prepare repository documentation. The notification worker code was reported as Google-assisted; its exact tool/search history must be added from the user's records. Changes were adapted and validated with a TypeScript build, focused tests, and Prisma validation. Live database connectivity, trusted JWT issuance, Redis availability, and provider account credentials still require setup before end-to-end operation.

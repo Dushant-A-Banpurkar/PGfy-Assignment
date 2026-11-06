@@ -1,74 +1,120 @@
-import { z } from 'zod';
+import { PropertyCategory } from "@prisma/client";
+import { z } from "zod";
 
-const categoryDetailsSchema = z.record(z.string(), z.json()).optional();
+export const PgHostelDetailsSchema = z.object({
+  sharingTypes: z
+    .array(z.enum(["SINGLE", "DOUBLE", "TRIPLE", "FOUR_SHARING"]))
+    .min(1),
+  genderAllowed: z.enum(["BOYS", "GIRLS", "COED"]),
+  foodIncluded: z.boolean(),
+  mealsOffered: z.array(z.enum(["BREAKFAST", "LUNCH", "DINNER"])).optional(),
+  curfewTime: z
+    .string()
+    .regex(/^([01]\d|2[0-3]):([0-5]\d)$/)
+    .nullable()
+    .optional(),
+  laundryIncluded: z.boolean().default(false),
+  noticePeriodDays: z.number().int().min(0).default(30),
+});
+
+export const DormitoryDetailsSchema = z.object({
+  totalBeds: z.number().int().positive(),
+  availableBeds: z.number().int().min(0),
+  bunkType: z.enum(["SINGLE_BED", "DOUBLE_DECKER", "CAPSULE"]),
+  genderAllowed: z.enum(["MEN", "WOMEN", "MIXED"]),
+  lockerProvided: z.boolean(),
+  commonBathroomsCount: z.number().int().min(1),
+  dailyStayAvailable: z.boolean().default(false),
+});
+
+export const FlatDetailsSchema = z.object({
+  bhkConfig: z.enum(["1RK", "1BHK", "2BHK", "3BHK", "4BHK_PLUS"]),
+  furnishingStatus: z.enum([
+    "UNFURNISHED",
+    "SEMI_FURNISHED",
+    "FULLY_FURNISHED",
+  ]),
+  carpetAreaSqFt: z.number().positive(),
+  floorNumber: z.number().int().min(0),
+  totalFloors: z.number().int().min(1),
+  preferredTenants: z.enum(["FAMILY", "BACHELORS", "COMPANY_LEASE", "ANY"]),
+  maintenanceMonthly: z.number().int().min(0).default(0),
+  parkingAvailable: z.boolean().default(false),
+});
+
+export const IndividualRoomDetailsSchema = z.object({
+  attachedWashroom: z.boolean(),
+  kitchenAccess: z.enum(["NONE", "SHARED_KITCHEN", "PRIVATE_PANTRY"]),
+  separateElectricityMeter: z.boolean(),
+  maxOccupants: z.number().int().min(1).max(6),
+  independentEntry: z.boolean().default(true),
+  furnishingStatus: z.enum([
+    "UNFURNISHED",
+    "SEMI_FURNISHED",
+    "FULLY_FURNISHED",
+  ]),
+});
 
 export const CreateUnverifiedPropertySchema = z
   .object({
-    name: z.string().trim().min(1).max(255),
-    description: z.string().trim().max(10000).optional(),
-    category: z.enum(['PG', 'HOSTEL', 'DORMITORY', 'FLAT', 'ROOM']),
-    city: z.string().trim().min(1).max(120),
-    locality: z.string().trim().min(1).max(120),
-    addressLine: z.string().trim().min(1),
-    pincode: z.string().trim().min(4).max(12),
-    rentMin: z.number().int().nonnegative(),
-    rentMax: z.number().int().nonnegative(),
-    securityDeposit: z.number().int().nonnegative().default(0),
-    ownerContactName: z.string().trim().min(1).max(120),
-    ownerContactPhone: z.string().trim().min(7).max(20),
-    ownerContactEmail: z.email().optional(),
-    categoryDetails: categoryDetailsSchema,
-    amenities: z.array(z.string().trim().min(1).max(80)).max(100).default([]),
+    title: z.string().min(5).max(200),
+    description: z.string().max(5000).optional(),
+    category: z.nativeEnum(PropertyCategory),
+    city: z.string().min(2).max(80),
+    locality: z.string().min(2).max(120),
+    addressLine: z.string().min(5),
+    pincode: z
+      .string()
+      .regex(/^[1-9][0-9]{5}$/, "Invalid 6-digit Indian pincode"),
+    latitude: z.number().min(-90).max(90).optional(),
+    longitude: z.number().min(-180).max(180).optional(),
+    rentMin: z.number().int().min(0),
+    rentMax: z.number().int().min(0),
+    securityDeposit: z.number().int().min(0).default(0),
+    ownerContactName: z.string().min(2).max(120),
+    ownerContactPhone: z
+      .string()
+      .regex(/^\+?[0-9]{10,15}$/, "Invalid phone number"),
+    ownerContactEmail: z.string().email().optional(),
+    amenities: z.array(z.string()).default([]),
+    categoryDetails: z.record(z.string(), z.unknown()),
     media: z
       .array(
         z.object({
-          mediaUrl: z.url(),
-          mediaType: z.enum(['IMAGE', 'VIDEO']).default('IMAGE'),
+          mediaUrl: z.string().url(),
+          mediaType: z.enum(["IMAGE", "VIDEO", "FLOOR_PLAN"]).default("IMAGE"),
           isPrimary: z.boolean().default(false),
-          sortOrder: z.number().int().nonnegative().default(0),
+          sortOrder: z.number().int().default(0),
         }),
       )
-      .max(30)
       .default([]),
     publishImmediately: z.boolean().default(false),
     forceCreateIgnoreDuplicateWarning: z.boolean().default(false),
   })
-  .refine((value) => value.rentMax >= value.rentMin, {
-    message: 'rentMax must be greater than or equal to rentMin',
-    path: ['rentMax'],
-  });
+  .superRefine((data, ctx) => {
+    if (data.rentMax < data.rentMin) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["rentMax"],
+        message: "rentMax must be greater than or equal to rentMin",
+      });
+    }
 
-export const UpdatePropertySchema = z
-  .object({
-    name: z.string().trim().min(1).max(255).optional(),
-    description: z.string().trim().max(10000).nullable().optional(),
-    category: z.enum(['PG', 'HOSTEL', 'DORMITORY', 'FLAT', 'ROOM']).optional(),
-    city: z.string().trim().min(1).max(120).optional(),
-    locality: z.string().trim().min(1).max(120).optional(),
-    addressLine: z.string().trim().min(1).optional(),
-    pincode: z.string().trim().min(4).max(12).optional(),
-    rentMin: z.number().int().nonnegative().optional(),
-    rentMax: z.number().int().nonnegative().optional(),
-    securityDeposit: z.number().int().nonnegative().optional(),
-    ownerContactName: z.string().trim().min(1).max(120).optional(),
-    ownerContactPhone: z.string().trim().min(7).max(20).optional(),
-    ownerContactEmail: z.email().nullable().optional(),
-    categoryDetails: categoryDetailsSchema,
-    amenities: z.array(z.string().trim().min(1).max(80)).max(100).optional(),
-  })
-  .refine((value) => Object.keys(value).length > 0, {
-    message: 'At least one property field must be provided',
-  });
+    // Validate categoryDetails JSONB against the specific PropertyCategory schema
+    const schemaMap: Record<PropertyCategory, z.ZodTypeAny> = {
+      PG_HOSTEL: PgHostelDetailsSchema,
+      DORMITORY: DormitoryDetailsSchema,
+      FLAT: FlatDetailsSchema,
+      INDIVIDUAL_ROOM: IndividualRoomDetailsSchema,
+    };
 
-export const PropertyListQuerySchema = z.object({
-  city: z.string().trim().min(1).optional(),
-  locality: z.string().trim().min(1).optional(),
-  category: z.enum(['PG', 'HOSTEL', 'DORMITORY', 'FLAT', 'ROOM']).optional(),
-  minRent: z.coerce.number().int().nonnegative().optional(),
-  maxRent: z.coerce.number().int().nonnegative().optional(),
-  verificationFilter: z.enum(['ALL', 'VERIFIED_ONLY', 'UNVERIFIED_ONLY']).default('ALL'),
-  foodIncluded: z.enum(['true', 'false']).optional(),
-  bhkConfig: z.string().trim().min(1).max(40).optional(),
-  page: z.coerce.number().int().positive().default(1),
-  limit: z.coerce.number().int().positive().max(50).default(20),
-});
+    const result = schemaMap[data.category].safeParse(data.categoryDetails);
+    if (!result.success) {
+      result.error.issues.forEach((issue) => {
+        ctx.addIssue({
+          ...issue,
+          path: ["categoryDetails", ...issue.path],
+        });
+      });
+    }
+  });
